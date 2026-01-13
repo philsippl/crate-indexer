@@ -15,12 +15,6 @@ A CLI tool and MCP server for fetching, indexing, and searching Rust crates from
 ## Installation
 
 ```bash
-cargo install crate-indexer
-```
-
-Or build from source:
-
-```bash
 git clone https://github.com/philsippl/crate-indexer
 cd crate-indexer
 cargo install --path .
