@@ -28,7 +28,7 @@ pub fn index_crate(crate_path: &Path, crate_name: &str) -> Result<IndexResult> {
     let files: Vec<(PathBuf, String)> = WalkDir::new(crate_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
         .map(|entry| {
             let file_path = entry.path().to_path_buf();
             let relative_path = file_path

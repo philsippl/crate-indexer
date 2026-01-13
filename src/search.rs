@@ -22,7 +22,7 @@ pub fn search_regex(crate_path: &Path, pattern: &str) -> Result<Vec<SearchMatch>
     let files: Vec<(PathBuf, String)> = WalkDir::new(crate_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
         .map(|entry| {
             let file_path = entry.path().to_path_buf();
             let relative_path = file_path
@@ -69,7 +69,7 @@ fn search_file(file_path: &Path, relative_path: &str, regex: &Regex) -> Vec<Sear
 
 pub fn search_functions(functions: &[FunctionInfo], pattern: Option<&str>) -> Result<Vec<FunctionInfo>> {
     let regex = pattern
-        .map(|p| Regex::new(p))
+        .map(Regex::new)
         .transpose()
         .with_context(|| "Invalid regex pattern")?;
 
@@ -85,4 +85,13 @@ pub fn search_functions(functions: &[FunctionInfo], pattern: Option<&str>) -> Re
         .collect();
 
     Ok(matches)
+}
+
+#[derive(Debug, Clone)]
+pub struct SemanticSearchResult {
+    pub item_id: String,
+    pub item_type: String,
+    pub similarity: f32,
+    pub text_content: String,
+    pub crate_key: String,
 }

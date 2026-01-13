@@ -23,3 +23,5 @@ rmcp = { version = "0.3", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 schemars = "1.0"
 dirs = "5"
+embed_anything = { version = "0.6", features = ["ort"] }
+byteorder = "1"

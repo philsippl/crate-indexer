@@ -1,3 +1,4 @@
+mod embeddings;
 mod fetcher;
 mod indexer;
 mod mcp;
@@ -10,6 +11,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashSet;
 
+use crate::embeddings::{embedding_to_bytes, EmbeddingManager};
 use crate::fetcher::Fetcher;
 use crate::indexer::index_crate;
 use crate::search::{search_functions, search_regex};
@@ -128,9 +130,25 @@ enum Commands {
     },
     /// Run as an MCP server (for AI assistant integration)
     Mcp,
+    /// Semantic search within a crate using natural language
+    SemanticSearch {
+        /// Name of the crate to search
+        crate_name: String,
+        /// Natural language search query
+        query: String,
+        /// Maximum results (default 10)
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+    /// Generate embeddings for a crate (for semantic search)
+    Embed {
+        /// Name of the crate to embed
+        crate_name: String,
+    },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -149,8 +167,13 @@ fn main() -> Result<()> {
         Commands::Read { crate_name, file_path, start, end } => cmd_read(&crate_name, &file_path, start, end)?,
         Commands::Readme { crate_name } => cmd_readme(&crate_name)?,
         Commands::Mcp => {
-            tokio::runtime::Runtime::new()?
-                .block_on(mcp::run_mcp_server())?;
+            mcp::run_mcp_server().await?;
+        }
+        Commands::SemanticSearch { crate_name, query, limit } => {
+            cmd_semantic_search(&crate_name, &query, limit).await?;
+        }
+        Commands::Embed { crate_name } => {
+            cmd_embed(&crate_name).await?;
         }
     }
 
@@ -244,7 +267,7 @@ fn cmd_functions(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_structs(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -283,7 +306,7 @@ fn cmd_structs(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_enums(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -319,7 +342,7 @@ fn cmd_enums(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_traits(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -352,7 +375,7 @@ fn cmd_traits(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_macros(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -385,7 +408,7 @@ fn cmd_macros(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_types(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -418,7 +441,7 @@ fn cmd_types(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_consts(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -451,7 +474,7 @@ fn cmd_consts(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_impls(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(|p| Regex::new(p)).transpose()?;
+    let regex = pattern.map(Regex::new).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -704,7 +727,7 @@ fn show_impl(db: &Database, crate_key: &str, i: &storage::ImplInfo) -> Result<()
     Ok(())
 }
 
-fn show_source(crate_path: &std::path::PathBuf, file: &str, start_line: usize, end_line: Option<usize>) -> Result<()> {
+fn show_source(crate_path: &std::path::Path, file: &str, start_line: usize, end_line: Option<usize>) -> Result<()> {
     let source_path = crate_path.join(file);
     if source_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&source_path) {
@@ -834,7 +857,7 @@ fn cmd_read(crate_name: &str, file_path: &str, start: Option<usize>, end: Option
 
 fn find_crate_key(db: &Database, name: &str) -> Result<String> {
     // Check if user specified a version (e.g., "anyhow-1.0.100")
-    let user_specified_version = name.contains('-') && name.split('-').last()
+    let user_specified_version = name.contains('-') && name.split('-').next_back()
         .map(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
         .unwrap_or(false);
 
@@ -901,7 +924,7 @@ fn fetch_single_crate(db: &Database, name: &str, version: Option<&str>) -> Resul
 
     while !to_fetch.is_empty() {
         // Take current batch
-        let batch: Vec<_> = to_fetch.drain(..).collect();
+        let batch: Vec<_> = std::mem::take(&mut to_fetch);
 
         // Resolve versions in parallel
         if batch.len() > 1 {
@@ -1025,6 +1048,310 @@ fn find_crate_keys_with_reexports(db: &Database, name: &str) -> Result<Vec<Strin
     }
 
     Ok(keys)
+}
+
+async fn cmd_semantic_search(crate_name: &str, query: &str, limit: usize) -> Result<()> {
+    // Run blocking operations (database + potential fetcher) in spawn_blocking
+    // Get all matching crate keys (handles multiple versions) and their re-exports
+    let crate_name_owned = crate_name.to_string();
+    let (main_crate_keys, all_crate_keys) = tokio::task::spawn_blocking(move || {
+        let db = Database::open()?;
+
+        // Find all versions matching the name
+        let main_keys = db.find_all_crate_keys(&crate_name_owned)?;
+        if main_keys.is_empty() {
+            return Ok::<_, anyhow::Error>((vec![], vec![]));
+        }
+
+        // Collect all keys including re-exports from all versions
+        let mut all_keys = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for main_key in &main_keys {
+            let keys_with_reexports = find_crate_keys_with_reexports(&db, main_key)?;
+            for key in keys_with_reexports {
+                if !seen.contains(&key) {
+                    seen.insert(key.clone());
+                    all_keys.push(key);
+                }
+            }
+        }
+
+        Ok((main_keys, all_keys))
+    }).await??;
+
+    if all_crate_keys.is_empty() {
+        println!("No crates found for '{}'", crate_name);
+        return Ok(());
+    }
+
+    // Generate embeddings for all crates that need them
+    for key in &all_crate_keys {
+        let key_clone = key.clone();
+        let has_embeddings = tokio::task::spawn_blocking(move || {
+            let db = Database::open()?;
+            db.has_embeddings(&key_clone)
+        }).await??;
+
+        if !has_embeddings {
+            println!("Generating embeddings for {}...", key);
+            generate_embeddings_async(key).await?;
+        }
+    }
+
+    // Initialize embedding manager for query
+    println!("Initializing embedding model...");
+    let embedder = EmbeddingManager::new()?;
+
+    // Perform semantic search
+    println!("Searching for: {}\n", query);
+
+    // Get stored embeddings from all crates
+    let keys_for_search = all_crate_keys.clone();
+    let stored_embeddings = tokio::task::spawn_blocking(move || {
+        let db = Database::open()?;
+        let mut all_embeddings = Vec::new();
+        for key in &keys_for_search {
+            all_embeddings.extend(db.get_all_embeddings(key)?);
+        }
+        Ok::<_, anyhow::Error>(all_embeddings)
+    }).await??;
+
+    // Embed query and compute similarities
+    let query_embedding = embedder.embed_query(query).await?;
+
+    use crate::embeddings::{bytes_to_embedding, cosine_similarity};
+    use rayon::prelude::*;
+    let mut results: Vec<crate::search::SemanticSearchResult> = stored_embeddings
+        .par_iter()
+        .map(|info| {
+            let embedding = bytes_to_embedding(&info.embedding);
+            let similarity = cosine_similarity(&query_embedding, &embedding);
+            crate::search::SemanticSearchResult {
+                item_id: info.id.clone(),
+                item_type: info.item_type.clone(),
+                similarity,
+                text_content: info.text_content.clone(),
+                crate_key: info.crate_key.clone(),
+            }
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
+
+    // Build header showing what we searched
+    let header = if main_crate_keys.len() > 1 {
+        format!("── {} versions + {} total crates ({} results) ──\n",
+            main_crate_keys.len(), all_crate_keys.len(), results.len())
+    } else if all_crate_keys.len() > 1 {
+        format!("── {} + {} re-exports ({} results) ──\n",
+            main_crate_keys[0], all_crate_keys.len() - 1, results.len())
+    } else {
+        format!("── {} ({} results) ──\n", main_crate_keys[0], results.len())
+    };
+
+    if results.is_empty() {
+        println!("No results found.");
+    } else {
+        println!("{}", header);
+        for result in &results {
+            println!("[{}] {} in {} (score: {:.3})",
+                result.item_id, result.item_type, result.crate_key, result.similarity);
+            // Show truncated text content
+            let text = result.text_content.lines().next().unwrap_or("");
+            let truncated = truncate_str(text, 80);
+            println!("  {}", truncated);
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_embed(crate_name: &str) -> Result<()> {
+    // Run blocking operations in spawn_blocking
+    let crate_name = crate_name.to_string();
+    let (crate_key, has_embeddings) = tokio::task::spawn_blocking(move || {
+        let db = Database::open()?;
+        let crate_key = find_crate_key(&db, &crate_name)?;
+        let has_embeddings = db.has_embeddings(&crate_key)?;
+        Ok::<_, anyhow::Error>((crate_key, has_embeddings))
+    }).await??;
+
+    if has_embeddings {
+        println!("Embeddings already exist for {}. Re-generating...", crate_key);
+    }
+
+    generate_embeddings_async(&crate_key).await?;
+    println!("Done!");
+
+    Ok(())
+}
+
+async fn generate_embeddings_async(crate_key: &str) -> Result<()> {
+    println!("Initializing embedding model...");
+    let embedder = EmbeddingManager::new()?;
+
+    // Phase 1: Collect all items from database (blocking)
+    let crate_key_owned = crate_key.to_string();
+    let (items_to_embed, crate_id) = tokio::task::spawn_blocking(move || {
+        let db = Database::open()?;
+        let mut items: Vec<(String, String, String)> = Vec::new(); // (id, type, text)
+
+        // Functions
+        for func in db.get_functions(&crate_key_owned)? {
+            let text = format_function_for_embedding(&func);
+            items.push((func.id, "function".to_string(), text));
+        }
+
+        // Structs
+        for s in db.get_structs(&crate_key_owned)? {
+            let text = format_struct_for_embedding(&s);
+            items.push((s.id, "struct".to_string(), text));
+        }
+
+        // Enums
+        for e in db.get_enums(&crate_key_owned)? {
+            let text = format_enum_for_embedding(&e);
+            items.push((e.id, "enum".to_string(), text));
+        }
+
+        // Traits
+        for t in db.get_traits(&crate_key_owned)? {
+            let text = format_trait_for_embedding(&t);
+            items.push((t.id, "trait".to_string(), text));
+        }
+
+        // Macros
+        for m in db.get_macros(&crate_key_owned)? {
+            let text = format_macro_for_embedding(&m);
+            items.push((m.id, "macro".to_string(), text));
+        }
+
+        // Type aliases
+        for t in db.get_type_aliases(&crate_key_owned)? {
+            let text = format_type_alias_for_embedding(&t);
+            items.push((t.id, "type_alias".to_string(), text));
+        }
+
+        // Constants
+        for c in db.get_constants(&crate_key_owned)? {
+            let text = format_constant_for_embedding(&c);
+            items.push((c.id, "constant".to_string(), text));
+        }
+
+        let crate_id = db.get_crate_id(&crate_key_owned)?
+            .ok_or_else(|| anyhow::anyhow!("Crate not found"))?;
+
+        Ok::<_, anyhow::Error>((items, crate_id))
+    }).await??;
+
+    if items_to_embed.is_empty() {
+        println!("No items to embed.");
+        return Ok(());
+    }
+
+    println!("Embedding {} items...", items_to_embed.len());
+
+    // Phase 2: Generate embeddings (async)
+    let texts: Vec<String> = items_to_embed.iter().map(|(_, _, t)| t.clone()).collect();
+    let embeddings = embedder.embed_texts(&texts).await?;
+
+    // Prepare for storage
+    let embeddings_to_store: Vec<(String, String, Vec<u8>, String)> = items_to_embed
+        .into_iter()
+        .zip(embeddings)
+        .map(|((id, item_type, text), emb)| {
+            let bytes = embedding_to_bytes(&emb);
+            (id, item_type, bytes, text)
+        })
+        .collect();
+
+    // Phase 3: Save to database (blocking)
+    let count = embeddings_to_store.len();
+    tokio::task::spawn_blocking(move || {
+        let db = Database::open()?;
+        db.save_embeddings(crate_id, &embeddings_to_store)?;
+        Ok::<_, anyhow::Error>(())
+    }).await??;
+
+    println!("Stored {} embeddings.", count);
+
+    Ok(())
+}
+
+fn format_function_for_embedding(func: &storage::FunctionInfo) -> String {
+    let mut text = func.signature.clone();
+    if let Some(docs) = &func.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_struct_for_embedding(s: &storage::StructInfo) -> String {
+    let mut text = format!("struct {}", s.name);
+    if !s.fields.is_empty() {
+        let field_names: Vec<&str> = s.fields.iter().map(|f| f.name.as_str()).collect();
+        text.push_str(" with fields: ");
+        text.push_str(&field_names.join(", "));
+    }
+    if let Some(docs) = &s.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_enum_for_embedding(e: &storage::EnumInfo) -> String {
+    let mut text = format!("enum {}", e.name);
+    if !e.variants.is_empty() {
+        let variant_names: Vec<&str> = e.variants.iter().map(|v| v.name.as_str()).collect();
+        text.push_str(" with variants: ");
+        text.push_str(&variant_names.join(", "));
+    }
+    if let Some(docs) = &e.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_trait_for_embedding(t: &storage::TraitInfo) -> String {
+    let mut text = format!("trait {}", t.name);
+    if let Some(docs) = &t.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_macro_for_embedding(m: &storage::MacroInfo) -> String {
+    let mut text = format!("macro {}!", m.name);
+    if let Some(docs) = &m.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_type_alias_for_embedding(t: &storage::TypeAliasInfo) -> String {
+    let mut text = format!("type {} = {}", t.name, t.type_str);
+    if let Some(docs) = &t.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
+}
+
+fn format_constant_for_embedding(c: &storage::ConstantInfo) -> String {
+    let mut text = format!("{} {}: {}", c.kind, c.name, c.type_str);
+    if let Some(docs) = &c.docs {
+        text.push_str(". ");
+        text.push_str(docs);
+    }
+    text
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {

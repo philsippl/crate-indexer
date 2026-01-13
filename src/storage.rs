@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const INDEX_DIR: &str = ".crate-indexer";
 const DB_FILE: &str = "index.db";
+
+// Type alias for common item row pattern: (id, name, file, line, end_line, visibility, docs)
+type ItemRow = (String, String, String, usize, Option<usize>, String, Option<String>);
 
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
@@ -109,6 +112,15 @@ pub struct ImplInfo {
     pub end_line: Option<usize>,
     pub self_type: String,
     pub trait_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingInfo {
+    pub id: String,
+    pub item_type: String,
+    pub embedding: Vec<u8>,
+    pub text_content: String,
+    pub crate_key: String,
 }
 
 // Container for all indexed items from a crate
@@ -290,12 +302,23 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_impls_crate ON impls(crate_id);
             CREATE INDEX IF NOT EXISTS idx_impls_self_type ON impls(self_type);
             CREATE INDEX IF NOT EXISTS idx_reexports_crate ON reexports(crate_id);
+
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id TEXT PRIMARY KEY,
+                item_type TEXT NOT NULL,
+                crate_id INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                text_content TEXT NOT NULL,
+                FOREIGN KEY (crate_id) REFERENCES crates(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_embeddings_crate ON embeddings(crate_id);
+            CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(item_type);
             ",
         )?;
         Ok(())
     }
 
-    pub fn add_crate(&self, key: &str, path: &PathBuf, items: &CrateItems, reexports: &[String]) -> Result<()> {
+    pub fn add_crate(&self, key: &str, path: &Path, items: &CrateItems, reexports: &[String]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
 
         // Insert or replace crate
@@ -310,7 +333,8 @@ impl Database {
             |row| row.get(0),
         )?;
 
-        // Delete old data for this crate
+        // Delete old data for this crate (including embeddings)
+        tx.execute("DELETE FROM embeddings WHERE crate_id = ?", [crate_id])?;
         tx.execute("DELETE FROM functions WHERE crate_id = ?", [crate_id])?;
         tx.execute("DELETE FROM struct_fields WHERE struct_id IN (SELECT id FROM structs WHERE crate_id = ?)", [crate_id])?;
         tx.execute("DELETE FROM structs WHERE crate_id = ?", [crate_id])?;
@@ -477,7 +501,14 @@ impl Database {
         let mut stmt = self.conn.prepare("SELECT path FROM crates WHERE key = ?")?;
         let path = stmt.query_row([key], |row| {
             let path: String = row.get(0)?;
-            Ok(PathBuf::from(path))
+            let path_buf = PathBuf::from(&path);
+            // Handle legacy relative paths stored in database
+            if path_buf.is_relative() {
+                if let Some(home) = dirs::home_dir() {
+                    return Ok(home.join(path_buf));
+                }
+            }
+            Ok(path_buf)
         }).optional()?;
         Ok(path)
     }
@@ -520,6 +551,25 @@ impl Database {
         }
     }
 
+    /// Find all crate keys matching a name (returns all versions if multiple exist)
+    pub fn find_all_crate_keys(&self, name: &str) -> Result<Vec<String>> {
+        // First check for exact match
+        let mut stmt = self.conn.prepare("SELECT key FROM crates WHERE key = ?")?;
+        if let Some(key) = stmt.query_row([name], |row| row.get::<_, String>(0)).optional()? {
+            return Ok(vec![key]);
+        }
+
+        // Then search for versioned matches
+        let mut stmt = self.conn.prepare(
+            "SELECT key FROM crates WHERE key GLOB ? ORDER BY key"
+        )?;
+        let pattern = format!("{}-[0-9]*", name);
+        let matches: Vec<String> = stmt.query_map([&pattern], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        Ok(matches)
+    }
+
     // Query functions
     pub fn get_functions(&self, crate_key: &str) -> Result<Vec<FunctionInfo>> {
         let mut stmt = self.conn.prepare(
@@ -558,7 +608,7 @@ impl Database {
             "SELECT s.id, s.name, s.file, s.line, s.end_line, s.visibility, s.docs
              FROM structs s JOIN crates c ON c.id = s.crate_id WHERE c.key = ?"
         )?;
-        let structs: Vec<(String, String, String, usize, Option<usize>, String, Option<String>)> = stmt.query_map([crate_key], |row| {
+        let structs: Vec<ItemRow> = stmt.query_map([crate_key], |row| {
             Ok((
                 row.get(0)?, row.get(1)?, row.get(2)?,
                 row.get::<_, i64>(3)? as usize,
@@ -618,7 +668,7 @@ impl Database {
             "SELECT e.id, e.name, e.file, e.line, e.end_line, e.visibility, e.docs
              FROM enums e JOIN crates c ON c.id = e.crate_id WHERE c.key = ?"
         )?;
-        let enums: Vec<(String, String, String, usize, Option<usize>, String, Option<String>)> = stmt.query_map([crate_key], |row| {
+        let enums: Vec<ItemRow> = stmt.query_map([crate_key], |row| {
             Ok((
                 row.get(0)?, row.get(1)?, row.get(2)?,
                 row.get::<_, i64>(3)? as usize,
@@ -828,6 +878,64 @@ impl Database {
                 self_type: row.get(5)?, trait_name: row.get(6)?,
             }))
         }).optional().map_err(Into::into)
+    }
+
+    // Embedding methods
+    pub fn has_embeddings(&self, crate_key: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embeddings e
+             JOIN crates c ON c.id = e.crate_id
+             WHERE c.key = ?",
+            [crate_key],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn get_crate_id(&self, crate_key: &str) -> Result<Option<i64>> {
+        self.conn.query_row(
+            "SELECT id FROM crates WHERE key = ?",
+            [crate_key],
+            |row| row.get(0),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn save_embeddings(&self, crate_id: i64, embeddings: &[(String, String, Vec<u8>, String)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO embeddings (id, item_type, crate_id, embedding, text_content)
+             VALUES (?, ?, ?, ?, ?)"
+        )?;
+
+        for (id, item_type, embedding_bytes, text_content) in embeddings {
+            stmt.execute(params![id, item_type, crate_id, embedding_bytes, text_content])?;
+        }
+
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_all_embeddings(&self, crate_key: &str) -> Result<Vec<EmbeddingInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.item_type, e.embedding, e.text_content, c.key
+             FROM embeddings e
+             JOIN crates c ON c.id = e.crate_id
+             WHERE c.key = ?"
+        )?;
+
+        let rows = stmt.query_map([crate_key], |row| {
+            Ok(EmbeddingInfo {
+                id: row.get(0)?,
+                item_type: row.get(1)?,
+                embedding: row.get(2)?,
+                text_content: row.get(3)?,
+                crate_key: row.get(4)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
