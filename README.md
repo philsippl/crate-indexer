@@ -14,10 +14,16 @@ A CLI tool and MCP server for fetching, indexing, and searching Rust crates from
 ## Installation
 
 ```bash
-cargo build --release
+cargo install crate-indexer
 ```
 
-The binary will be at `target/release/crate-indexer`.
+Or build from source:
+
+```bash
+git clone https://github.com/philsippl/crate-indexer
+cd crate-indexer
+cargo install --path .
+```
 
 ## CLI Usage
 
@@ -111,12 +117,14 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "crate-indexer": {
-      "command": "/path/to/crate-indexer",
+      "command": "crate-indexer",
       "args": ["mcp"]
     }
   }
 }
 ```
+
+Note: If `crate-indexer` is not in your PATH, use the full path (e.g., `~/.cargo/bin/crate-indexer`).
 
 ### Available MCP Tools
 
