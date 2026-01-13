@@ -8,13 +8,12 @@ mod storage;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
-use regex::Regex;
 use std::collections::HashSet;
 
 use crate::embeddings::{embedding_to_bytes, EmbeddingManager};
 use crate::fetcher::Fetcher;
 use crate::indexer::index_crate;
-use crate::search::{search_functions, search_regex};
+use crate::search::{build_regex, search_functions, search_regex};
 use crate::storage::{
     ConstantInfo, Database, EnumInfo, ImplInfo, MacroInfo, StructInfo, TraitInfo, TypeAliasInfo,
 };
@@ -267,7 +266,7 @@ fn cmd_functions(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_structs(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -306,7 +305,7 @@ fn cmd_structs(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_enums(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -342,7 +341,7 @@ fn cmd_enums(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_traits(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -375,7 +374,7 @@ fn cmd_traits(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_macros(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -408,7 +407,7 @@ fn cmd_macros(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_types(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -441,7 +440,7 @@ fn cmd_types(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_consts(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -474,7 +473,7 @@ fn cmd_consts(crate_name: &str, pattern: Option<&str>) -> Result<()> {
 
 fn cmd_impls(crate_name: &str, pattern: Option<&str>) -> Result<()> {
     let db = Database::open()?;
-    let regex = pattern.map(Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let crate_keys = find_crate_keys_with_reexports(&db, crate_name)?;
     let mut total = 0;
@@ -542,7 +541,8 @@ fn cmd_show(id: &str) -> Result<()> {
 }
 
 fn show_function(db: &Database, crate_key: &str, func: &storage::FunctionInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Function: {}", func.name);
     println!("Crate:    {}", crate_key);
@@ -564,7 +564,8 @@ fn show_function(db: &Database, crate_key: &str, func: &storage::FunctionInfo) -
 }
 
 fn show_struct(db: &Database, crate_key: &str, s: &storage::StructInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Struct: {}", s.name);
     println!("Crate:  {}", crate_key);
@@ -592,7 +593,8 @@ fn show_struct(db: &Database, crate_key: &str, s: &storage::StructInfo) -> Resul
 }
 
 fn show_enum(db: &Database, crate_key: &str, e: &storage::EnumInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Enum:   {}", e.name);
     println!("Crate:  {}", crate_key);
@@ -621,7 +623,8 @@ fn show_enum(db: &Database, crate_key: &str, e: &storage::EnumInfo) -> Result<()
 }
 
 fn show_trait(db: &Database, crate_key: &str, t: &storage::TraitInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Trait:  {}", t.name);
     println!("Crate:  {}", crate_key);
@@ -642,7 +645,8 @@ fn show_trait(db: &Database, crate_key: &str, t: &storage::TraitInfo) -> Result<
 }
 
 fn show_macro(db: &Database, crate_key: &str, m: &storage::MacroInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Macro:  {}!", m.name);
     println!("Crate:  {}", crate_key);
@@ -665,7 +669,8 @@ fn show_macro(db: &Database, crate_key: &str, m: &storage::MacroInfo) -> Result<
 }
 
 fn show_type_alias(db: &Database, crate_key: &str, t: &storage::TypeAliasInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("Type:   {}", t.name);
     println!("Crate:  {}", crate_key);
@@ -688,7 +693,8 @@ fn show_type_alias(db: &Database, crate_key: &str, t: &storage::TypeAliasInfo) -
 }
 
 fn show_constant(db: &Database, crate_key: &str, c: &storage::ConstantInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     println!("{}: {}", c.kind.to_uppercase(), c.name);
     println!("Crate:  {}", crate_key);
@@ -710,7 +716,8 @@ fn show_constant(db: &Database, crate_key: &str, c: &storage::ConstantInfo) -> R
 }
 
 fn show_impl(db: &Database, crate_key: &str, i: &storage::ImplInfo) -> Result<()> {
-    let crate_path = db.get_crate_path(crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     let impl_desc = match &i.trait_name {
         Some(trait_name) => format!("impl {} for {}", trait_name, i.self_type),
@@ -755,7 +762,8 @@ fn cmd_latest(crate_name: &str) -> Result<()> {
 fn cmd_readme(crate_name: &str) -> Result<()> {
     let db = Database::open()?;
     let crate_key = find_crate_key(&db, crate_name)?;
-    let crate_path = db.get_crate_path(&crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(&crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     // Look for README files in order of preference
     let readme_names = [
@@ -785,7 +793,8 @@ fn cmd_readme(crate_name: &str) -> Result<()> {
 fn cmd_read(crate_name: &str, file_path: &str, start: Option<usize>, end: Option<usize>) -> Result<()> {
     let db = Database::open()?;
     let crate_key = find_crate_key(&db, crate_name)?;
-    let crate_path = db.get_crate_path(&crate_key)?.unwrap();
+    let crate_path = db.get_crate_path(&crate_key)?
+        .ok_or_else(|| anyhow::anyhow!("Crate path not found for '{}'", crate_key))?;
 
     // Security: prevent path traversal attacks
     let file_path = std::path::Path::new(file_path);
@@ -828,12 +837,23 @@ fn cmd_read(crate_name: &str, file_path: &str, start: Option<usize>, end: Option
         anyhow::bail!("File not found");
     }
 
+    const MAX_DEFAULT_LINES: usize = 500;
+
     let content = std::fs::read_to_string(&full_path)?;
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
     let start_line = start.unwrap_or(1).max(1);
-    let end_line = end.unwrap_or(total_lines).min(total_lines);
+
+    // If no end specified and file is large, cap at MAX_DEFAULT_LINES
+    let (end_line, was_truncated) = match end {
+        Some(e) => (e.min(total_lines), false),
+        None => {
+            let default_end = (start_line + MAX_DEFAULT_LINES - 1).min(total_lines);
+            let truncated = default_end < total_lines;
+            (default_end, truncated)
+        }
+    };
 
     if start_line > total_lines {
         anyhow::bail!("Start line {} exceeds file length ({})", start_line, total_lines);
@@ -848,7 +868,10 @@ fn cmd_read(crate_name: &str, file_path: &str, start: Option<usize>, end: Option
         }
     }
 
-    if end_line < total_lines {
+    if was_truncated {
+        println!("\n[OUTPUT TRUNCATED] Showing lines {}-{} of {}. Use --start/--end to read more.",
+            start_line, end_line, total_lines);
+    } else if end_line < total_lines {
         println!("\n... {} more lines", total_lines - end_line);
     }
 
@@ -857,8 +880,12 @@ fn cmd_read(crate_name: &str, file_path: &str, start: Option<usize>, end: Option
 
 fn find_crate_key(db: &Database, name: &str) -> Result<String> {
     // Check if user specified a version (e.g., "anyhow-1.0.100")
+    // Version must start with digit AND contain a dot (to avoid matching "crate-2fast")
     let user_specified_version = name.contains('-') && name.split('-').next_back()
-        .map(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
+        .map(|s| {
+            let starts_with_digit = s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+            starts_with_digit && s.contains('.')
+        })
         .unwrap_or(false);
 
     match db.find_crate_key(name)? {
@@ -906,9 +933,12 @@ fn extract_crate_name(key: &str) -> String {
     // We need to extract "crate-name" (handle crates with hyphens in names)
     let parts: Vec<&str> = key.rsplitn(2, '-').collect();
     if parts.len() == 2 {
-        // Check if the last part looks like a version
+        // Check if the last part looks like a semver version (e.g., "1.2.3")
+        // Must start with digit and contain at least one '.'
         let potential_version = parts[0];
-        if potential_version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        let starts_with_digit = potential_version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let contains_dot = potential_version.contains('.');
+        if starts_with_digit && contains_dot {
             return parts[1].to_string();
         }
     }
@@ -1027,21 +1057,32 @@ fn fetch_single_crate(db: &Database, name: &str, version: Option<&str>) -> Resul
 }
 
 fn find_crate_keys_with_reexports(db: &Database, name: &str) -> Result<Vec<String>> {
+    const MAX_REEXPORT_DEPTH: usize = 5;
+    const MAX_TOTAL_CRATES: usize = 50;
+
     let root_key = find_crate_key(db, name)?;
     let mut keys = vec![root_key.clone()];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(root_key.clone());
 
-    // Recursively collect all reexported crates
-    let mut to_process = vec![root_key];
-    while let Some(key) = to_process.pop() {
+    // Recursively collect reexported crates with depth limit
+    let mut to_process: Vec<(String, usize)> = vec![(root_key, 0)];
+    while let Some((key, depth)) = to_process.pop() {
+        if depth >= MAX_REEXPORT_DEPTH || keys.len() >= MAX_TOTAL_CRATES {
+            break;
+        }
+
         for reexport in db.get_reexports(&key)? {
             // Find the actual indexed key for this reexport
             if let Some(reexport_key) = db.find_crate_key(&reexport)? {
                 if !seen.contains(&reexport_key) {
                     seen.insert(reexport_key.clone());
                     keys.push(reexport_key.clone());
-                    to_process.push(reexport_key);
+                    to_process.push((reexport_key, depth + 1));
+
+                    if keys.len() >= MAX_TOTAL_CRATES {
+                        break;
+                    }
                 }
             }
         }
@@ -1355,10 +1396,14 @@ fn format_constant_for_embedding(c: &storage::ConstantInfo) -> String {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    // Find a safe UTF-8 boundary
+    let target = max_len.saturating_sub(3);
+    match s.char_indices().nth(target) {
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+        None => s.to_string(), // String is shorter than target chars
     }
 }
 

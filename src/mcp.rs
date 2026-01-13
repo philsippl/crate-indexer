@@ -10,12 +10,12 @@ use rmcp::{
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::future::Future;
+use std::future::Future; // Required by #[tool] macro
 
 use crate::embeddings::{embedding_to_bytes, EmbeddingManager};
 use crate::fetcher::Fetcher;
 use crate::indexer::index_crate;
-use crate::search::{search_functions, search_regex};
+use crate::search::{build_regex, search_functions, search_regex};
 use crate::storage::Database;
 
 #[derive(Debug, Clone)]
@@ -287,57 +287,17 @@ pub async fn run_mcp_server() -> Result<()> {
 // Implementation functions
 
 fn ensure_crate(db: &Database, name: &str) -> anyhow::Result<String> {
-    // Check if user specified a version (e.g., "anyhow-1.0.100")
-    let user_specified_version = name.contains('-') && name.split('-').next_back()
-        .map(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-        .unwrap_or(false);
-
+    // For MCP: use what's indexed, only auto-fetch if crate is not found at all.
+    // This avoids network calls on every operation.
     match db.find_crate_key(name)? {
-        Some(key) => {
-            // If user specified an exact version, use it
-            if user_specified_version {
-                return Ok(key);
-            }
-
-            // Check if there's a newer version available
-            let fetcher = Fetcher::new()?;
-            let crate_name = extract_crate_name(&key);
-
-            match fetcher.get_latest_version(&crate_name) {
-                Ok(latest_version) => {
-                    let latest_key = format!("{}-{}", crate_name, latest_version);
-                    if latest_key != key {
-                        // Newer version available
-                        if db.find_crate_key(&latest_key)?.is_none() {
-                            do_fetch_crate(&crate_name, Some(&latest_version))?;
-                        }
-                        Ok(latest_key)
-                    } else {
-                        Ok(key)
-                    }
-                }
-                Err(_) => Ok(key), // Can't check, use existing
-            }
-        }
+        Some(key) => Ok(key),
         None => {
+            // Auto-fetch only when crate is not found
             do_fetch_crate(name, None)?;
             db.find_crate_key(name)?
                 .ok_or_else(|| anyhow::anyhow!("Failed to fetch crate '{}'", name))
         }
     }
-}
-
-fn extract_crate_name(key: &str) -> String {
-    // Key format: "crate-name-1.2.3"
-    // Extract "crate-name" (handle crates with hyphens in names)
-    let parts: Vec<&str> = key.rsplitn(2, '-').collect();
-    if parts.len() == 2 {
-        let potential_version = parts[0];
-        if potential_version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            return parts[1].to_string();
-        }
-    }
-    key.to_string()
 }
 
 fn do_fetch_crate(name: &str, version: Option<&str>) -> anyhow::Result<String> {
@@ -471,7 +431,7 @@ fn do_list_structs(crate_name: &str, pattern: Option<&str>) -> anyhow::Result<St
     let crate_key = ensure_crate(&db, crate_name)?;
 
     let structs = db.get_structs(&crate_key)?;
-    let regex = pattern.map(regex::Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let matches: Vec<_> = structs.iter()
         .filter(|s| regex.as_ref().map(|r| r.is_match(&s.name)).unwrap_or(true))
@@ -501,7 +461,7 @@ fn do_list_enums(crate_name: &str, pattern: Option<&str>) -> anyhow::Result<Stri
     let crate_key = ensure_crate(&db, crate_name)?;
 
     let enums = db.get_enums(&crate_key)?;
-    let regex = pattern.map(regex::Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let matches: Vec<_> = enums.iter()
         .filter(|e| regex.as_ref().map(|r| r.is_match(&e.name)).unwrap_or(true))
@@ -529,7 +489,7 @@ fn do_list_traits(crate_name: &str, pattern: Option<&str>) -> anyhow::Result<Str
     let crate_key = ensure_crate(&db, crate_name)?;
 
     let traits = db.get_traits(&crate_key)?;
-    let regex = pattern.map(regex::Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let matches: Vec<_> = traits.iter()
         .filter(|t| regex.as_ref().map(|r| r.is_match(&t.name)).unwrap_or(true))
@@ -561,7 +521,7 @@ fn do_list_impls(crate_name: &str, pattern: Option<&str>) -> anyhow::Result<Stri
     let crate_key = ensure_crate(&db, crate_name)?;
 
     let impls = db.get_impls(&crate_key)?;
-    let regex = pattern.map(regex::Regex::new).transpose()?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let matches: Vec<_> = impls.iter()
         .filter(|i| {
@@ -709,7 +669,7 @@ fn get_source(db: &Database, crate_key: &str, file: &str, start: usize, end: Opt
 
     let source_path = crate_path.join(file);
     if !source_path.exists() {
-        return Ok("Source file not found".to_string());
+        anyhow::bail!("Source file '{}' not found in {}", file, crate_key);
     }
 
     let content = std::fs::read_to_string(&source_path)?;
@@ -819,10 +779,14 @@ fn do_read_readme(crate_name: &str) -> anyhow::Result<String> {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
+    if s.len() <= max {
+        return s.to_string();
+    }
+    // Find a safe UTF-8 boundary
+    let target = max.saturating_sub(3);
+    match s.char_indices().nth(target) {
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+        None => s.to_string(),
     }
 }
 
@@ -912,19 +876,30 @@ async fn do_semantic_search(crate_name: &str, query: &str, limit: usize) -> anyh
 
 /// Get all crate keys including re-exports recursively
 fn get_crate_keys_with_reexports(db: &Database, main_key: &str) -> anyhow::Result<Vec<String>> {
+    const MAX_REEXPORT_DEPTH: usize = 5;
+    const MAX_TOTAL_CRATES: usize = 50;
+
     let mut keys = vec![main_key.to_string()];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(main_key.to_string());
 
-    let mut to_process = vec![main_key.to_string()];
+    let mut to_process: Vec<(String, usize)> = vec![(main_key.to_string(), 0)];
 
-    while let Some(key) = to_process.pop() {
+    while let Some((key, depth)) = to_process.pop() {
+        if depth >= MAX_REEXPORT_DEPTH || keys.len() >= MAX_TOTAL_CRATES {
+            break;
+        }
+
         for reexport in db.get_reexports(&key)? {
             if let Some(reexport_key) = db.find_crate_key(&reexport)? {
                 if !seen.contains(&reexport_key) {
                     seen.insert(reexport_key.clone());
                     keys.push(reexport_key.clone());
-                    to_process.push(reexport_key);
+                    to_process.push((reexport_key, depth + 1));
+
+                    if keys.len() >= MAX_TOTAL_CRATES {
+                        break;
+                    }
                 }
             }
         }

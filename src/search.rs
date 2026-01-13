@@ -1,12 +1,21 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::storage::FunctionInfo;
+
+/// Build a regex with size limits to prevent ReDoS attacks
+pub fn build_regex(pattern: &str) -> Result<Regex> {
+    RegexBuilder::new(pattern)
+        .size_limit(1024 * 1024) // 1MB compiled size limit
+        .dfa_size_limit(1024 * 1024) // 1MB DFA cache limit
+        .build()
+        .with_context(|| format!("Invalid or too complex regex: {}", pattern))
+}
 
 #[derive(Debug)]
 pub struct SearchMatch {
@@ -16,7 +25,7 @@ pub struct SearchMatch {
 }
 
 pub fn search_regex(crate_path: &Path, pattern: &str) -> Result<Vec<SearchMatch>> {
-    let regex = Regex::new(pattern).with_context(|| format!("Invalid regex: {}", pattern))?;
+    let regex = build_regex(pattern)?;
 
     // Collect all .rs files first
     let files: Vec<(PathBuf, String)> = WalkDir::new(crate_path)
@@ -68,10 +77,7 @@ fn search_file(file_path: &Path, relative_path: &str, regex: &Regex) -> Vec<Sear
 }
 
 pub fn search_functions(functions: &[FunctionInfo], pattern: Option<&str>) -> Result<Vec<FunctionInfo>> {
-    let regex = pattern
-        .map(Regex::new)
-        .transpose()
-        .with_context(|| "Invalid regex pattern")?;
+    let regex = pattern.map(|p| build_regex(p)).transpose()?;
 
     let matches: Vec<FunctionInfo> = functions
         .par_iter()

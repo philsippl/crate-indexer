@@ -174,16 +174,19 @@ struct ItemVisitor {
 }
 
 impl ItemVisitor {
-    fn generate_id(&self, line: usize) -> String {
+    fn generate_id(&self, name: &str, line: usize, kind: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
         self.crate_name.hash(&mut hasher);
         self.file_path.hash(&mut hasher);
+        name.hash(&mut hasher);
         line.hash(&mut hasher);
+        kind.hash(&mut hasher);
 
-        format!("{:08x}", hasher.finish() as u32)
+        // Use full 64-bit hash for lower collision probability
+        format!("{:016x}", hasher.finish())[..8].to_string()
     }
 
     fn visibility_str(vis: &Visibility) -> String {
@@ -197,11 +200,12 @@ impl ItemVisitor {
     fn add_function(&mut self, sig: &Signature, attrs: &[Attribute], start_line: usize, end_line: Option<usize>) {
         let signature = format_signature(sig);
         let docs = extract_docs(attrs);
-        let id = self.generate_id(start_line);
+        let name = sig.ident.to_string();
+        let id = self.generate_id(&name, start_line, "fn");
 
         self.items.functions.push(FunctionInfo {
             id,
-            name: sig.ident.to_string(),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             end_line,
@@ -249,9 +253,10 @@ impl ItemVisitor {
             Fields::Unit => vec![],
         };
 
+        let name = item.ident.to_string();
         self.items.structs.push(StructInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "struct"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             end_line,
@@ -304,9 +309,10 @@ impl ItemVisitor {
             })
             .collect();
 
+        let name = item.ident.to_string();
         self.items.enums.push(EnumInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "enum"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             end_line,
@@ -320,9 +326,10 @@ impl ItemVisitor {
         let start_line = item.trait_token.span.start().line;
         let end_line = Some(item.brace_token.span.close().end().line);
 
+        let name = item.ident.to_string();
         self.items.traits.push(TraitInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "trait"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             end_line,
@@ -336,10 +343,11 @@ impl ItemVisitor {
             let start_line = item.mac.path.segments.first()
                 .map(|s| s.ident.span().start().line)
                 .unwrap_or(1);
+            let name = ident.to_string();
 
             self.items.macros.push(MacroInfo {
-                id: self.generate_id(start_line),
-                name: ident.to_string(),
+                id: self.generate_id(&name, start_line, "macro"),
+                name,
                 file: self.file_path.clone(),
                 line: start_line,
                 end_line: None,
@@ -352,10 +360,11 @@ impl ItemVisitor {
     fn add_type_alias(&mut self, item: &ItemType) {
         let start_line = item.type_token.span.start().line;
         let ty = &item.ty;
+        let name = item.ident.to_string();
 
         self.items.type_aliases.push(TypeAliasInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "type"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             type_str: quote::quote!(#ty).to_string(),
@@ -367,10 +376,11 @@ impl ItemVisitor {
     fn add_const(&mut self, item: &ItemConst) {
         let start_line = item.const_token.span.start().line;
         let ty = &item.ty;
+        let name = item.ident.to_string();
 
         self.items.constants.push(ConstantInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "const"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             kind: "const".to_string(),
@@ -383,10 +393,11 @@ impl ItemVisitor {
     fn add_static(&mut self, item: &ItemStatic) {
         let start_line = item.static_token.span.start().line;
         let ty = &item.ty;
+        let name = item.ident.to_string();
 
         self.items.constants.push(ConstantInfo {
-            id: self.generate_id(start_line),
-            name: item.ident.to_string(),
+            id: self.generate_id(&name, start_line, "static"),
+            name,
             file: self.file_path.clone(),
             line: start_line,
             kind: "static".to_string(),
@@ -406,8 +417,14 @@ impl ItemVisitor {
             quote::quote!(#path).to_string()
         });
 
+        // Use self_type + trait_name for ID uniqueness
+        let id_name = match &trait_name {
+            Some(t) => format!("{}_{}", self_type, t),
+            None => self_type.clone(),
+        };
+
         self.items.impls.push(ImplInfo {
-            id: self.generate_id(start_line),
+            id: self.generate_id(&id_name, start_line, "impl"),
             file: self.file_path.clone(),
             line: start_line,
             end_line,
