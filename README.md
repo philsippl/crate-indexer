@@ -6,6 +6,7 @@ A CLI tool and MCP server for fetching, indexing, and searching Rust crates from
 
 - Fetch and index crates from crates.io with automatic dependency resolution
 - Search through source code with regex patterns
+- Semantic search using natural language queries
 - Browse and search functions, structs, enums, traits, macros, type aliases, constants, and impl blocks
 - Automatic update checking - always uses the latest crate version
 - MCP server mode for AI assistant integration (Claude, etc.)
@@ -42,6 +43,25 @@ crate-indexer fetch serde --version 1.0.200
 ```bash
 # Regex search through crate source
 crate-indexer search serde "impl.*Serialize"
+```
+
+### Semantic search
+
+Search using natural language instead of regex patterns:
+
+```bash
+# Find code by meaning
+crate-indexer semantic-search tokio "spawn async task"
+crate-indexer semantic-search serde "convert struct to json"
+
+# Limit results (default 10)
+crate-indexer semantic-search reqwest "make http request" --limit 5
+```
+
+Before using semantic search, generate embeddings for the crate:
+
+```bash
+crate-indexer embed tokio
 ```
 
 ### Browse definitions
@@ -132,6 +152,7 @@ Note: If `crate-indexer` is not in your PATH, use the full path (e.g., `~/.cargo
 |------|-------------|
 | `fetch_crate` | Download and index a crate from crates.io |
 | `search_crate` | Regex search through crate source code |
+| `semantic_search` | Natural language search for code (slower, requires embeddings) |
 | `list_functions` | List/search function definitions |
 | `list_structs` | List/search struct definitions |
 | `list_enums` | List/search enum definitions |
